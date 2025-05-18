@@ -5,6 +5,7 @@ import com.example.rosys.enums.PolygonCreationType;
 import com.example.rosys.repositories.GridRepo;
 import lombok.RequiredArgsConstructor;
 import org.locationtech.jts.geom.*;
+import org.locationtech.jts.geom.Polygon;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -17,6 +18,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
+import java.util.List;
 
 
 @Service
@@ -32,7 +34,32 @@ public class GridServiceImpl implements GridService{
 
         int[][] raster = parseRasterValues(raw);
         int[][] classifiedMatrix = classifyMatrix(raster, firstBoundary, secondBoundary);
+        //generates colored png for classifiedmatrix
+        /*BufferedImage image = new BufferedImage(512, 512, BufferedImage.TYPE_INT_RGB);
 
+        for (int y = 0; y < 512; y++) {
+            for (int x = 0; x < 512; x++) {
+                int value = classifiedMatrix[y][x];
+                Color color;
+
+                switch (value) {
+                    case 0: color = Color.WHITE; break;
+                    case 1: color = Color.BLACK; break;
+                    case 2: color = Color.RED; break;
+                    default: color = Color.MAGENTA; // hiba esetén
+                }
+
+                image.setRGB(x, y, color.getRGB());
+            }
+        }
+
+        try {
+            File outputFile = new File("matrix_colored.png");
+            ImageIO.write(image, "png", outputFile);
+            System.out.println("Kép elmentve: " + outputFile.getAbsolutePath());
+        } catch (IOException e) {
+            e.printStackTrace();
+        }*/
         Map<Integer, List<Polygon>> grouped = new HashMap<>();
         GeometryFactory geometryFactory = new GeometryFactory();
         Map<String, Object> map = gridRepo.getScaleAndOriginMap();
@@ -44,6 +71,52 @@ public class GridServiceImpl implements GridService{
 
 
         List<Region> regions = findRegions(classifiedMatrix, raster);
+
+        // generates colored png for regions
+        /*int[][] newMatrix = new int[512][512];
+
+        for (int i = 0; i < 512; i++) {
+            for (int j = 0; j < 512; j++) {
+                newMatrix[i][j] = 3;
+            }
+        }
+
+
+        for (Region region : regions) {
+            for (int[] pixel : region.getPixels()) {
+                int x = pixel[0];
+                int y = pixel[1];
+                if (x >= 0 && x < 512 && y >= 0 && y < 512) {
+                    newMatrix[x][y] = region.getValue();
+                }
+            }
+        }
+
+        for (int y = 0; y < 512; y++) {
+            for (int x = 0; x < 512; x++) {
+                int value = newMatrix[y][x];
+                Color color;
+
+                switch (value) {
+                    case 0: color = Color.WHITE; break;
+                    case 1: color = Color.BLACK; break;
+                    case 2: color = Color.RED; break;
+                    case 3: color = Color.YELLOW; break;
+                    default: color = Color.MAGENTA;
+                }
+
+                image.setRGB(x, y, color.getRGB());
+            }
+        }
+
+        try {
+            File outputFile = new File("matrix2_colored.png");
+            ImageIO.write(image, "png", outputFile);
+            System.out.println("Kép elmentve: " + outputFile.getAbsolutePath());
+        } catch (IOException e) {
+            e.printStackTrace();
+        }*/
+
 
         for (Region region : regions) {
             Polygon polygon = regionToPolygon(region, geometryFactory, originX, originY, scaleX, scaleY, type);
