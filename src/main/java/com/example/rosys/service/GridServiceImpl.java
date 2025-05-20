@@ -60,7 +60,7 @@ public class GridServiceImpl implements GridService{
         } catch (IOException e) {
             e.printStackTrace();
         }*/
-        Map<Integer, List<Polygon>> grouped = new HashMap<>();
+        Map<Integer, List<MultiPolygon>> grouped = new HashMap<>();
         GeometryFactory geometryFactory = new GeometryFactory();
         Map<String, Object> map = gridRepo.getScaleAndOriginMap();
         double originX = ((Number) map.get("origin_x")).doubleValue();
@@ -119,7 +119,7 @@ public class GridServiceImpl implements GridService{
 
 
         for (Region region : regions) {
-            Polygon polygon = regionToPolygon(region, geometryFactory, originX, originY, scaleX, scaleY, type);
+            MultiPolygon polygon = regionToPolygon(region, geometryFactory, originX, originY, scaleX, scaleY, type);
             grouped.computeIfAbsent(region.getValue(), k -> new ArrayList<>()).add(polygon);
         }
 
@@ -128,9 +128,9 @@ public class GridServiceImpl implements GridService{
         Map<Integer, Double> categoryAverages = new HashMap<>();
 
 
-        for (Map.Entry<Integer, List<Polygon>> entry : grouped.entrySet()) {
+        for (Map.Entry<Integer, List<MultiPolygon>> entry : grouped.entrySet()) {
             int category = entry.getKey();
-            List<Polygon> polygons = entry.getValue();
+            List<MultiPolygon> polygons = entry.getValue();
 
             double total = 0;
             int count = 0;
@@ -145,7 +145,7 @@ public class GridServiceImpl implements GridService{
             double avg = count == 0 ? 0 : total / count;
             categoryAverages.put(category, avg);
 
-            MultiPolygon mp = geometryFactory.createMultiPolygon(polygons.toArray(new Polygon[0]));
+            MultiPolygon mp = polygons.get(0);
             result.put(category, mp);
         }
 
@@ -286,35 +286,39 @@ public class GridServiceImpl implements GridService{
         return regions;
     }
 
-    public Polygon regionToPolygon(Region region, GeometryFactory geometryFactory, double originX, double originY, double scaleX, double scaleY, PolygonCreationType type) {
-
+    public MultiPolygon regionToPolygon(Region region, GeometryFactory geometryFactory, double originX, double originY, double scaleX, double scaleY, PolygonCreationType type) {
         if(type == null || type == PolygonCreationType.CONVEX_HULL) {
             Coordinate[] coords = region.getPixels().stream()
-                    .map(p -> new Coordinate(
-                            originX + p[1] * scaleX,
-                            originY + p[0] * scaleY
-                    ))
+                    .map(p -> new Coordinate(originX + p[1] * scaleX, originY + p[0] * scaleY))
                     .toArray(Coordinate[]::new);
             Geometry geom = geometryFactory.createMultiPointFromCoords(coords).convexHull();
-
             if (geom instanceof Polygon) {
-                return (Polygon) geom;
+                return geometryFactory.createMultiPolygon(new Polygon[]{(Polygon) geom});
             } else {
-                return geometryFactory.createPolygon();
+                return geometryFactory.createMultiPolygon(new Polygon[]{geometryFactory.createPolygon()});
             }
         } else {
             int[][] mask = generateMaskFromRegion(region, 512, 512);
-            List<int[]> contour = traceContour(mask);
+            List<List<int[]>> contours = traceAllContours(mask);
+            List<Polygon> polygons = new ArrayList<>();
 
-            Coordinate[] coords = contour.stream()
-                    .map(p -> new Coordinate(originX + p[1] * scaleX, originY + p[0] * scaleY))
-                    .toArray(Coordinate[]::new);
-            coords = Arrays.copyOf(coords, coords.length + 1);
-            coords[coords.length - 1] = coords[0];
+            for (List<int[]> contour : contours) {
+                if (contour.size() < 3) continue;
+                Coordinate[] coords = contour.stream()
+                        .map(p -> new Coordinate(originX + p[1] * scaleX, originY + p[0] * scaleY))
+                        .toArray(Coordinate[]::new);
+                coords = Arrays.copyOf(coords, coords.length + 1);
+                coords[coords.length - 1] = coords[0];
+                polygons.add(geometryFactory.createPolygon(coords));
+            }
 
-            Polygon geom = geometryFactory.createPolygon(coords);
-
-            return geom;
+            if (polygons.size() == 1) {
+                return geometryFactory.createMultiPolygon(new Polygon[]{polygons.get(0)});
+            } else if (!polygons.isEmpty()) {
+                return geometryFactory.createMultiPolygon(polygons.toArray(new Polygon[0]));
+            } else {
+                return geometryFactory.createMultiPolygon(new Polygon[]{geometryFactory.createPolygon()});
+            }
         }
     }
 
@@ -330,27 +334,89 @@ public class GridServiceImpl implements GridService{
         return mask;
     }
 
-    private static List<int[]> traceContour(int[][] binaryMask) {
-        int rows = binaryMask.length;
-        int cols = binaryMask[0].length;
 
+    private static List<List<int[]>> traceAllContours(int[][] mask) {
+        int rows = mask.length;
+        int cols = mask[0].length;
         boolean[][] visited = new boolean[rows][cols];
+        List<List<int[]>> contours = new ArrayList<>();
 
-        List<int[]> contour = new ArrayList<>();
-
-        outerLoop:
-        for (int i = 0; i < rows; i++) {
-            for (int j = 0; j < cols; j++) {
-                if (binaryMask[i][j] == 1) {
-                    contour.add(new int[]{i, j});
-                    visited[i][j] = true;
-                    followContour(i, j, binaryMask, visited, contour);
-                    break outerLoop;
+        for (int y = 0; y < rows; y++) {
+            for (int x = 0; x < cols; x++) {
+                if (mask[y][x] == 1 && hasZeroNeighbor(mask, y, x) && !visited[y][x]) {
+                    List<int[]> contour = traceSingleContour(mask, visited, y, x);
+                    if (!contour.isEmpty()) {
+                        contours.add(contour);
+                    }
                 }
             }
         }
 
+        return contours;
+    }
+
+    private static List<int[]> traceSingleContour(int[][] mask, boolean[][] visited, int startY, int startX) {
+        List<int[]> contour = new ArrayList<>();
+        int rows = mask.length;
+        int cols = mask[0].length;
+
+        int cy = startY;
+        int cx = startX;
+        int sy = startY;
+        int sx = startX;
+        int dir = 4;
+
+        contour.add(new int[]{cy, cx});
+        visited[cy][cx] = true;
+
+        int step = 0;
+        int maxSteps = rows * cols * 4;
+
+        while (step < maxSteps) {
+            boolean foundNext = false;
+            int startDir = (dir + 1) % 8;
+
+            for (int i = 0; i < 8; i++) {
+                int ndir = (startDir + i) % 8;
+                int ny = cy + directions[ndir][0];
+                int nx = cx + directions[ndir][1];
+
+                if (ny >= 0 && ny < rows && nx >= 0 && nx < cols && mask[ny][nx] == 1 && !visited[ny][nx]) {
+                    cy = ny;
+                    cx = nx;
+                    dir = (ndir + 6) % 8;
+                    contour.add(new int[]{cy, cx});
+                    visited[cy][cx] = true;
+                    foundNext = true;
+                    break;
+                }
+            }
+
+            if (!foundNext || (cy == sy && cx == sx && contour.size() > 1)) {
+                break;
+            }
+
+            step++;
+        }
+
         return contour;
+    }
+
+    private static boolean hasZeroNeighbor(int[][] mask, int y, int x) {
+        int rows = mask.length;
+        int cols = mask[0].length;
+
+        for (int[] dir : directions) {
+            int ny = y + dir[0];
+            int nx = x + dir[1];
+            if (ny < 0 || ny >= rows || nx < 0 || nx >= cols) {
+                return true;
+            }
+            if (mask[ny][nx] == 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static String toGeoJson(Map<Integer, MultiPolygon> classifiedMultipolygons, Map<Integer, Double> categoryAverages) {
@@ -433,42 +499,8 @@ public class GridServiceImpl implements GridService{
 
 
 
-    private static void followContour(int startX, int startY, int[][] mask, boolean[][] visited, List<int[]> contour) {
-        int rows = mask.length;
-        int cols = mask[0].length;
 
-        int x = startX;
-        int y = startY;
-        int dir = 0;
-
-        while (true) {
-            boolean foundNext = false;
-
-            for (int i = 0; i < 8; i++) {
-                int d = (dir + i) % 8;
-                int nx = x + DIRECTIONS[d][0];
-                int ny = y + DIRECTIONS[d][1];
-
-                if (nx >= 0 && ny >= 0 && nx < rows && ny < cols) {
-                    if (mask[nx][ny] == 1 && !visited[nx][ny]) {
-                        contour.add(new int[]{nx, ny});
-                        visited[nx][ny] = true;
-                        x = nx;
-                        y = ny;
-                        dir = (d + 5) % 8;
-                        foundNext = true;
-                        break;
-                    }
-                }
-            }
-
-            if (!foundNext || (x == startX && y == startY)) {
-                break;
-            }
-        }
-    }
-
-    private static final int[][] DIRECTIONS = {
+    private static final int[][] directions = {
             {-1,  0},
             {-1,  1},
             { 0,  1},
